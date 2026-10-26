@@ -11,6 +11,29 @@
   </p>
 </div>
 
+## About this fork
+
+This is a personal fork of
+[lennylxx/webos-iptv-player](https://github.com/lennylxx/webos-iptv-player).
+It adds a choice of live player for channels the TV's own player handles
+badly, such as 4K channels with Dolby Digital Plus (E-AC-3) audio that
+stutter or play without sound:
+
+- **Settings → Advanced → Live player**: System player (default), Shaka
+  Player, or mpegts.js.
+- **Shaka Player** plays live HLS over MSE.
+- **mpegts.js** plays live HLS and MPEG-TS with less memory than Shaka. The
+  build patches mpegts.js to decode DVB Dolby Digital Plus, and it smooths
+  over the timestamp jumps some providers' streams contain.
+
+How they work, and their limits:
+[docs/shaka-live-player.md](docs/shaka-live-player.md).
+
+The release badges above and **Install on your TV** below point to upstream
+releases, which don't include these players. Build the IPK from this fork
+instead (see **Development**). Everything else is the upstream project's
+work; problems with these players belong here, not upstream.
+
 ## Screenshots
 
 | Channel list | Live preview |

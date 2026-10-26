@@ -11,6 +11,23 @@
   </p>
 </div>
 
+## 关于此分支
+
+这是 [lennylxx/webos-iptv-player](https://github.com/lennylxx/webos-iptv-player)
+的个人分支。它为电视自带播放器处理不佳的频道提供了直播播放器选择，例如带杜比数字+
+（Dolby Digital Plus，E-AC-3）音频、会卡顿或无声的 4K 频道：
+
+- **设置 → 高级 → 直播播放器**：系统播放器（默认）、Shaka Player 或 mpegts.js。
+- **Shaka Player** 通过 MSE 播放直播 HLS。
+- **mpegts.js** 播放直播 HLS 和 MPEG-TS，内存占用低于 Shaka。构建时会修补
+  mpegts.js 以解码 DVB 杜比数字+，并平滑部分提供商流中的时间戳跳变。
+
+工作原理与限制：[docs/shaka-live-player.md](docs/shaka-live-player.md)。
+
+上方的版本徽章和下方的**安装到电视**指向上游发布版本，其中不包含这些播放器。
+请改为从此分支构建 IPK（参见**开发**）。其余功能均来自上游项目；这些播放器的
+问题请在此分支反馈，而非上游。
+
 ## 截图
 
 | 频道列表 | 直播预览 |
