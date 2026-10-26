@@ -358,6 +358,16 @@ describe('StorageService', () => {
     expect(StorageService.getEpgOffsets()).toEqual({});
   });
 
+  it('validates and persists the live player', () => {
+    expect(StorageService.getLivePlayer()).toBe('system');
+    for (const player of ['shaka', 'mpegts', 'system'] as const) {
+      StorageService.setLivePlayer(player);
+      expect(StorageService.getLivePlayer()).toBe(player);
+    }
+    localStorage.setItem('iptv_live_player', JSON.stringify('other'));
+    expect(StorageService.getLivePlayer()).toBe('system');
+  });
+
   it('defaults the theme to midnight and round-trips a selection', () => {
     expect(StorageService.getTheme()).toBe('midnight');
     StorageService.setTheme('arctic');

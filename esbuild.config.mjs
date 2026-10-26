@@ -5,7 +5,8 @@ import {
   scanBundle,
   formatViolations,
 } from './scripts/compat-gate.mjs';
-import { validateShakaBundle } from './scripts/shaka-compat-gate.mjs';
+import { patchMpegts } from './scripts/mpegts-patch.mjs';
+import { prepareShakaWorker, validateShakaBundle } from './scripts/shaka-compat-gate.mjs';
 import { writeThirdPartyNotices } from './scripts/third-party-notices.mjs';
 import {
   convertLegacyColorSyntax,
@@ -107,9 +108,17 @@ const shippedBuilds = [
 const bundled = await Promise.all(shippedBuilds.map(({ config }) =>
   esbuild.build({ ...config, minify: true, metafile: true })));
 
-const shakaBundle = readFileSync('node_modules/shaka-player/dist/shaka-player.dash.js', 'utf8');
+const shakaBundle = readFileSync('node_modules/shaka-player/dist/shaka-player.compiled.js', 'utf8');
 validateShakaBundle(shakaBundle);
-writeFileSync('dist/js/shaka-player.dash.js', shakaBundle);
+writeFileSync('dist/js/shaka-player.compiled.js', shakaBundle);
+const shakaWorker = readFileSync('node_modules/shaka-player/dist/shaka-player.transmuxer-worker.js', 'utf8');
+writeFileSync('dist/js/shaka-player.transmuxer-worker.js', prepareShakaWorker(shakaWorker));
+const mpegtsBundle = patchMpegts(readFileSync('node_modules/mpegts.js/dist/mpegts.js', 'utf8'));
+const mpegtsViolations = scanBundle(mpegtsBundle);
+if (mpegtsViolations.length > 0) {
+  throw new Error(`mpegts.js bundle:\n${formatViolations(mpegtsViolations)}`);
+}
+writeFileSync('dist/js/mpegts.js', mpegtsBundle);
 
 // webOS 4 (Chromium 53) bundle compat gate. Down-leveling handles post-53
 // *syntax*, but not *APIs* — and dependencies get bundled in without passing
@@ -122,7 +131,7 @@ for (const { name, config } of shippedBuilds) {
     throw new Error(`${name} bundle:\n${formatViolations(violations)}`);
   }
 }
-console.log('Compat gate: app, worker and Shaka bundles are Chromium-53 clean.');
+console.log('Compat gate: app, worker, Shaka and mpegts.js bundles are Chromium-53 clean.');
 
 // Desktop-only HLS and MPEG-TS libraries. Shaka stays in its separate lazy
 // bundle on both desktop and webOS.

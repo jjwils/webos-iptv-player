@@ -9,8 +9,8 @@ ClearKey and the desktop preview use Shaka through MSE.
 | Platform | Playback path | Track control |
 |---|---|---|
 | webOS, clear or PlayReady | Native `MPEG-DASH` transport | HTML5 audio tracks, self-rendered raw WebVTT, and the native subtitle compositor |
-| webOS, Widevine or ClearKey | Shaka DASH-only through MSE/EME | The `MseEngine` adapter |
-| Desktop preview | Shaka DASH-only | The `MseEngine` adapter |
+| webOS, Widevine or ClearKey | Shaka through MSE/EME | The `MseEngine` adapter |
+| Desktop preview | Shaka | The `MseEngine` adapter |
 
 ## Shaka webOS compatibility
 
@@ -44,8 +44,10 @@ For all three DRM systems, Shaka's [encryption-scheme fallback](https://github.c
 assumes `cenc`, adding `cbcs` on webOS 6+. These are compatibility heuristics,
 not proof that a device can play a given codec, encryption scheme or license policy.
 
-Use the standard ES5 `shaka-player.dash.js` [build](https://github.com/shaka-project/shaka-player/blob/main/build/all.py),
-not the separate `dash-es2021` build, for this app's Chromium 53 floor.
+Use the standard ES5 `shaka-player.compiled.js` [build](https://github.com/shaka-project/shaka-player/blob/main/build/all.py),
+not an `es2021` build, for this app's Chromium 53 floor. The full build also
+plays live HLS when the Live player setting selects Shaka (see
+[shaka-live-player.md](shaka-live-player.md)).
 
 ## Detection
 
@@ -208,7 +210,7 @@ DRM client is ready, the player OSD shows a `PlayReady` stream information pill.
 
 Widevine DASH uses Shaka's MSE/EME path on webOS because the native DASH
 transport does not consume standard EME `MediaKeys`. The production package
-contains the official DASH-only Shaka build, but loads and initializes it only
+contains the official full Shaka build, but loads and initializes it only
 when the playlist or MPD identifies Widevine or ClearKey. Clear streams and PlayReady
 therefore keep the native hardware path without Shaka startup or memory cost.
 

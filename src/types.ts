@@ -373,6 +373,10 @@ export interface ChannelScope {
  *  the default) or stays within the launch scope above ('active'). */
 export type ChannelCycleMode = 'global' | 'active';
 
+/** Which player plays live HLS on webOS: the system media pipeline, or Shaka
+ *  Player over MSE (which transmuxes E-AC-3 the system player drops). */
+export type LivePlayer = 'system' | 'shaka' | 'mpegts';
+
 export type NavDirection = 'up' | 'down' | 'left' | 'right';
 
 export type Action =

@@ -6,6 +6,7 @@ const { pipeline, tracks, osd, playlist, health } = vi.hoisted(() => ({
   pipeline: {
     load: vi.fn(), destroy: vi.fn(), setVideoElement: vi.fn(),
     currentLoadToken: vi.fn(() => 1), videoLabel: vi.fn(() => 'video'),
+    isShakaActive: vi.fn(() => false), liveSeekable: vi.fn(() => null),
   },
   tracks: {
     resetForLoad: vi.fn(), suspend: vi.fn(), stop: vi.fn(), attachVod: vi.fn(),

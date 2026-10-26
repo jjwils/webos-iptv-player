@@ -89,6 +89,8 @@ export const DENYLIST = [
   { name: 'toSpliced', kind: 'method', minChrome: 110, message: 'Array.prototype.toSpliced is Chrome 110+ — copy then splice the array.' },
   { name: 'isWellFormed', kind: 'method', minChrome: 111, message: 'String.prototype.isWellFormed is Chrome 111+ — validate surrogate pairs explicitly.' },
   { name: 'toWellFormed', kind: 'method', minChrome: 111, message: 'String.prototype.toWellFormed is Chrome 111+ — sanitize surrogate pairs explicitly.' },
+  { name: 'getOrInsert', kind: 'method', minChrome: 145, message: 'Map.prototype.getOrInsert is Chrome 145+ — use has/get/set.' },
+  { name: 'getOrInsertComputed', kind: 'method', minChrome: 145, message: 'Map.prototype.getOrInsertComputed is Chrome 145+ — use has/get/set.' },
   // --- globals (bundle scan only; eslint covers these via compat/compat) ---
   { name: 'BigInt', kind: 'global', minChrome: 67, message: 'BigInt is Chrome 67+ — use Number or string-based integer handling.' },
   { name: 'structuredClone', kind: 'global', minChrome: 98, message: 'structuredClone is Chrome 98+ — write a typed copy for the required data.' },

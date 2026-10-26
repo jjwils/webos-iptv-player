@@ -46,6 +46,18 @@ export function hdrFromTransfer(transfer: number): string {
   return '';
 }
 
+// "5.1" / "7.1" for multichannel audio, from a layout read from the stream or
+// an HLS CHANNELS count; stereo and mono add nothing to the OSD.
+export function channelLayoutLabel(layout: string, channels: string): string {
+  let value = layout;
+  if (!value) {
+    const count = parseInt(channels, 10);
+    value = count === 6 ? '5.1' : count === 8 ? '7.1' : '';
+  }
+  const parts = value.split('.').map(Number);
+  return parts[0] > 2 || parts[1] > 0 ? value : '';
+}
+
 // FRAME-RATE → whole-number label (59.94 → "60", 23.976 → "24"); 0 → '' (unknown).
 export function frameRateLabel(fps: number): string {
   return fps > 0 ? String(Math.round(fps)) : '';

@@ -11,7 +11,9 @@ Shaka Player
 ------------
 https://github.com/shaka-project/shaka-player
 Copyright 2016 Google LLC; Apache-2.0.
-The DASH bundle is redistributed without modification.
+The full compiled bundle is redistributed without modification. Its
+transmuxer worker is redistributed with a Map.prototype.getOrInsertComputed
+polyfill prepended at build time (scripts/shaka-compat-gate.mjs).
 Full upstream license, including embedded third-party notices:
   licenses/shaka-player.txt
 This includes MIT notices for Mozilla's language-mapping-list (Ali Al Dallal)
@@ -26,6 +28,19 @@ The Shaka port's complete license and third-party NOTICE are preserved in:
   licenses/shaka-cml-cmcd-NOTICE.txt
 https://github.com/streaming-video-technology-alliance/common-media-library
 See the NOTICE for the original authors, licenses, and incorporated work.
+
+mpegts.js
+---------
+https://github.com/xqq/mpegts.js
+Copyright (C) 2016 Bilibili and contributors; Apache-2.0.
+Modified: the distributed bundle is patched at build time
+(scripts/mpegts-patch.mjs) to recognize DVB AC-3 and E-AC-3 audio, merge
+dependent E-AC-3 substreams into their frame, and correct the E-AC-3
+dec3 data rate and sample duration.
+Full upstream license:
+  licenses/mpegts.js.txt
+The bundle includes es6-promise, Copyright (c) 2014 Yehuda Katz, Tom Dale,
+Stefan Penner and contributors; MIT.
 
 ASS subtitle rendering and compilation
 -------------------------------------

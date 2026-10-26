@@ -11,6 +11,7 @@ const PACKAGES = [
   ['iso-639-2', 'MIT', 'license'],
   ['qrcode-generator', 'MIT', null],
   ['shaka-player', 'Apache-2.0', 'LICENSE'],
+  ['mpegts.js', 'Apache-2.0', 'LICENSE'],
   ['esbuild', 'MIT', 'LICENSE.md'],
   ['typescript', 'Apache-2.0', 'LICENSE.txt'],
 ];

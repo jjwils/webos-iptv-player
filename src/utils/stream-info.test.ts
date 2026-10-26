@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest';
 import type { AudioTrackOption, SubtitleTrackOption } from '../types';
-import { resolutionBadge, hdrLabel, hdrFromTransfer, frameRateLabel, parseVariants, pickVariant, codecName, audioSummary, subtitleSummary } from './stream-info';
+import { resolutionBadge, hdrLabel, hdrFromTransfer, frameRateLabel, channelLayoutLabel, parseVariants, pickVariant, codecName, audioSummary, subtitleSummary } from './stream-info';
 
 const a = (over: Partial<AudioTrackOption>): AudioTrackOption => ({ index: 0, label: '', active: false, ...over });
 const s = (over: Partial<SubtitleTrackOption>): SubtitleTrackOption => ({ index: 0, label: '', active: false, ...over });
@@ -60,6 +60,23 @@ describe('frameRateLabel', () => {
   });
   it('returns "" for absent/zero', () => {
     expect(frameRateLabel(0)).toBe('');
+  });
+});
+
+describe('channelLayoutLabel', () => {
+  it('shows a multichannel layout read from the stream', () => {
+    expect(channelLayoutLabel('5.1', '')).toBe('5.1');
+    expect(channelLayoutLabel('7.1', '2')).toBe('7.1');
+  });
+  it('derives 5.1 and 7.1 from an HLS channel count', () => {
+    expect(channelLayoutLabel('', '6')).toBe('5.1');
+    expect(channelLayoutLabel('', '8')).toBe('7.1');
+  });
+  it('adds nothing for stereo, mono, or an unknown count', () => {
+    expect(channelLayoutLabel('2.0', '')).toBe('');
+    expect(channelLayoutLabel('1.0', '')).toBe('');
+    expect(channelLayoutLabel('', '16/JOC')).toBe('');
+    expect(channelLayoutLabel('', '')).toBe('');
   });
 });
 

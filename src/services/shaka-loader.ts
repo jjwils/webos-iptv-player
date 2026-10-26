@@ -1,7 +1,7 @@
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('Shaka');
-const SHAKA_SCRIPT = 'js/shaka-player.dash.js';
+const SHAKA_SCRIPT = 'js/shaka-player.compiled.js';
 
 interface SchemeRequest {
   headers: Record<string, string>;
@@ -63,7 +63,7 @@ function prepare(shaka: ShakaNamespaceLike): ShakaNamespaceLike {
   const licenseType = networking?.RequestType?.LICENSE;
   if (networking?.registerScheme && networking.PluginPriority && licenseType !== undefined) {
     const prefix = 'data:application/json;base64,';
-    // The pinned DASH artifact omits this scheme; an upstream plugin wins over FALLBACK.
+    // Shaka's own data: plugin, when its build registers one, wins over FALLBACK.
     networking.registerScheme('data', (uri, request, type) => ({
       promise: Promise.resolve().then(() => {
         if (type !== licenseType || !uri.startsWith(prefix)) {

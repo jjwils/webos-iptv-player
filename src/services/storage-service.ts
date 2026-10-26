@@ -1,6 +1,6 @@
 import { CONFIG } from '../config';
 import { DEFAULT_THEME, DEFAULT_OVERLAY, DEFAULT_TEXT_SIZE, isValidTextSize, type OverlayStyle, type TextSize } from '../config/themes';
-import type { AudioPref, CatchupProgressEntry, Channel, ChannelCustomization, ChannelCycleMode, ManualEpgSource, ParentalControlConfig, ParentalPinThrottle, PlaylistEntry, RecentlyWatchedLiveEntry, Reminder, ResumeEntry, ResumeKind, SubtitlePref, TzMode, WatchlistEntry, WatchlistKind, XtreamLiveCategorySnapshot } from '../types';
+import type { AudioPref, CatchupProgressEntry, Channel, ChannelCustomization, ChannelCycleMode, LivePlayer, ManualEpgSource, ParentalControlConfig, ParentalPinThrottle, PlaylistEntry, RecentlyWatchedLiveEntry, Reminder, ResumeEntry, ResumeKind, SubtitlePref, TzMode, WatchlistEntry, WatchlistKind, XtreamLiveCategorySnapshot } from '../types';
 import type { OnlineSubtitleConfig, PickedOnlineSub } from './subtitle-search/types';
 import { channelKey, legacyChannelKey } from '../utils/channel';
 import { genPlaylistId } from '../utils/playlist';
@@ -1074,6 +1074,14 @@ export const StorageService = {
   },
   setChannelCycleMode(mode: ChannelCycleMode): void {
     set('channel_cycle_mode', mode);
+  },
+
+  getLivePlayer(): LivePlayer {
+    const player = get<unknown>('live_player', 'system');
+    return player === 'shaka' || player === 'mpegts' ? player : 'system';
+  },
+  setLivePlayer(player: LivePlayer): void {
+    set('live_player', player);
   },
 
   getLocalePreference(): LocalePreference {

@@ -319,9 +319,9 @@ for (const drm of [
     await expect(pills).toContainText('HLG');
     await expect(pills).not.toContainText('HDR10+');
     await expect.poll(() => diagnostics.report().diagnostics.filter(event =>
-      event.code === 'playback.dash.variant.changed').length).toBe(2);
+      event.code === 'playback.shaka.variant.changed').length).toBe(2);
     const report = diagnostics.report();
-    const adaptations = report.diagnostics.filter(event => event.code === 'playback.dash.variant.changed');
+    const adaptations = report.diagnostics.filter(event => event.code === 'playback.shaka.variant.changed');
     expect(adaptations.every(event => diagnostics.field(event, 'reason') === 'adaptation'
       && diagnostics.field(event, 'load') !== null)).toBe(true);
     expect(adaptations[0].text).toContain('width=1280 height=720');
@@ -331,7 +331,7 @@ for (const drm of [
     expect(adaptations[1].text).toContain('audioAtmos=false');
     expect(diagnostics.summary(report)).toContain('reason=adaptation');
     expect(report.diagnostics.map(event => event.code)).toEqual(expect.arrayContaining([
-      'playback.dash.init.started', 'playback.dash.load.started', 'playback.dash.load.completed',
+      'playback.shaka.init.started', 'playback.shaka.load.started', 'playback.shaka.load.completed',
     ]));
     await diagnostics.close();
   });

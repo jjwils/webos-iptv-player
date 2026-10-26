@@ -1,4 +1,4 @@
-import type { Action, ChannelCycleMode, EpgSource, ManualEpgSource, NavDirection, PlaylistEntry, TzMode, XtreamLiveCategoryFilter, XtreamLiveCategorySnapshot } from '../types';
+import type { Action, ChannelCycleMode, EpgSource, LivePlayer, ManualEpgSource, NavDirection, PlaylistEntry, TzMode, XtreamLiveCategoryFilter, XtreamLiveCategorySnapshot } from '../types';
 import { $, $$, html, raw, type Safe } from '../utils/dom';
 import { morph } from '../utils/morph';
 import { SpatialNav, isFocusMove } from '../navigation/spatial-nav';
@@ -745,6 +745,7 @@ export class Settings {
     const textSize = StorageService.getTextSize();
     const localePreference = StorageService.getLocalePreference();
     const liveReconnectAttempts = StorageService.getLiveReconnectAttempts();
+    const livePlayer = StorageService.getLivePlayer();
     const numberEntryOsdTimeoutMs = StorageService.getNumberEntryOsdTimeoutMs();
     const playerOsdTimeoutMs = StorageService.getPlayerOsdTimeoutMs();
     const animationMode = StorageService.getAnimationMode();
@@ -1073,6 +1074,20 @@ export class Settings {
                       })),
                       String(liveReconnectAttempts),
                     )}
+                    </div>
+                  </div>
+                  <div class="settings-advanced-row">
+                    <div class="settings-advanced-group" aria-hidden="true"></div>
+                    <div class="settings-advanced-description">
+                      <div class="settings-item-title">${t('settings.livePlayer')}</div>
+                      <div class="settings-item-hint">${t('settings.livePlayerHint')}</div>
+                    </div>
+                    <div class="settings-advanced-control">
+                    ${toggleGroup('live-player', [
+                      { value: 'system', label: t('settings.livePlayerSystem') },
+                      { value: 'shaka', label: 'Shaka Player' },
+                      { value: 'mpegts', label: 'mpegts.js' },
+                    ], livePlayer)}
                     </div>
                   </div>
                   <div class="settings-advanced-row">
@@ -2907,6 +2922,9 @@ export class Settings {
       ($('#live-reconnect-attempts', this.container) as HTMLElement | null)?.dataset.value,
     );
     StorageService.setLiveReconnectAttempts(liveReconnectAttempts);
+
+    const livePlayerBtn = $('#live-player .toggle-option.active', this.container);
+    if (livePlayerBtn?.dataset.value) StorageService.setLivePlayer(livePlayerBtn.dataset.value as LivePlayer);
 
     const numberEntryOsdTimeoutMs = Number(
       ($('#number-entry-osd-timeout', this.container) as HTMLElement | null)?.dataset.value,
