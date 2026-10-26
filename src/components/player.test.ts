@@ -44,6 +44,9 @@ vi.mock('../services/storage-service', () => ({
   },
 }));
 vi.mock('./toast', () => ({ showToast: vi.fn() }));
+vi.mock('../services/mpegts-loader', () => ({
+  loadMpegts: vi.fn(() => Promise.reject(new Error('mpegts.js unavailable'))),
+}));
 vi.mock('../services/media-probe', () => ({ probeMedia: vi.fn() }));
 vi.mock('../services/subtitle-search/subtitle-search-service', () => ({
   subtitleSearchService: { isAvailable: () => false },
@@ -943,6 +946,36 @@ describe('Player native playback-rate retry', () => {
   });
 });
 
+describe('Player stream info from Shaka', () => {
+  it('shows the HDR range, frame rate, and audio layout the pipeline reports', () => {
+    const { video } = fakeLiveVideo(0, 60, 60);
+    (video as unknown as { videoHeight: number }).videoHeight = 2160;
+    player.init(video);
+    player.play(0);
+    const internals = player as unknown as {
+      pipeline: {
+        isMseActive(): boolean;
+        streamInfo(): unknown;
+        callbacks: { onStreamInfoUpdated(): void };
+      };
+    };
+    vi.spyOn(internals.pipeline, 'isMseActive').mockReturnValue(true);
+    vi.spyOn(internals.pipeline, 'streamInfo').mockReturnValue({
+      videoCodec: 'hvc1', audioCodec: 'ec-3', videoRange: 'PQ', frameRate: 50,
+      audioChannels: '', audioLayout: '5.1', audioAtmos: false,
+    });
+
+    internals.pipeline.callbacks.onStreamInfoUpdated();
+
+    const info = container.querySelector('.osd-stream-info')?.textContent ?? '';
+    expect(info).toContain('4K');
+    expect(info).toContain('HDR');
+    expect(info).toContain('50fps');
+    expect(info).toContain('HEVC');
+    expect(info).toContain('Dolby Digital+ 5.1');
+  });
+});
+
 describe('Player live DVR', () => {
   let live: HTMLVideoElement;
   let setWindow: (s: number, e: number) => void;
@@ -1014,6 +1047,33 @@ describe('Player live DVR', () => {
     live.dispatchEvent(new Event('progress'));
 
     expect(live.currentTime).toBe(10 + OLDEST_PAD);
+  });
+
+  it('draws and seeks within Shaka\'s live window instead of the buffered range', () => {
+    const pipeline = (player as unknown as {
+      pipeline: { isShakaActive(): boolean; liveSeekable(): unknown };
+    }).pipeline;
+    vi.spyOn(pipeline, 'isShakaActive').mockReturnValue(true);
+    vi.spyOn(pipeline, 'liveSeekable').mockReturnValue(
+      { length: 1, start: () => 100, end: () => 400 });
+
+    player.handleAction('rewind');
+    expect(live.currentTime).toBe(100 + OLDEST_PAD);
+    player.handleAction('fast_forward');
+    expect(live.currentTime).toBe(400 - PAD);
+  });
+
+  it('leaves the playhead to Shaka when Shaka owns the live window', () => {
+    const pipeline = (player as unknown as { pipeline: { isShakaActive(): boolean } }).pipeline;
+    vi.spyOn(pipeline, 'isShakaActive').mockReturnValue(true);
+    player.handleAction('rewind');
+    expect(live.currentTime).toBe(OLDEST_PAD);
+
+    setWindow(10, 70);
+    live.dispatchEvent(new Event('progress'));
+    live.dispatchEvent(new Event('timeupdate'));
+
+    expect(live.currentTime).toBe(OLDEST_PAD);
   });
 
   // The OSD controls are driven from click by coordinates, like the seek bar.

@@ -133,6 +133,7 @@ a new term after review, add a row here.
 | Name sort direction | A–Z / Z–A | A–Z / Z–A |
 | Date added / Year sort direction | Newest / Oldest | 最新 / 最早 |
 | Rating sort direction | Highest / Lowest | 最高 / 最低 |
+| Live HLS player choice | Live player: System player / Shaka Player | 直播播放器：系统播放器 / Shaka Player |
 
 Rejected: 片单 (watchlist), 正在播放 for NOW, 节目单 (guide),
 全局频道 / "Global" for all channels, "programme",

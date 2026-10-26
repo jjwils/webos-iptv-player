@@ -22,8 +22,8 @@ const TARGET_CHROME = 53;
 // engine that has no such interface at all — which is what the exemption
 // deliberately opts out of.
 const KEEP_GLOBALS = new Set([
-  // hls.js and mpegts.js are desktop-preview only — they are not in the webOS
-  // bundle, so their post-53 API use cannot break a TV.
+  // hls.js is desktop-preview only, and mpegts.js loads only when the Live
+  // player setting picks it, so their post-53 API use cannot break a TV.
   'MediaSource',
   'SourceBuffer',
   'ReadableStream',

@@ -10,6 +10,10 @@ const cacheMocks = vi.hoisted(() => ({
 
 vi.mock('../services/idb-cache', () => cacheMocks);
 
+const tsInfoMock = vi.hoisted(() => ({ parseTsInfo: vi.fn() }));
+
+vi.mock('../parsers/ts-info', () => tsInfoMock);
+
 function callbacks(): PlayerPipelineOptions {
   return {
     playbackLabel: token => `load=${String(token)}`,
@@ -19,6 +23,7 @@ function callbacks(): PlayerPipelineOptions {
     onAudioTracksUpdated: vi.fn(),
     onSubtitleTracksUpdated: vi.fn(),
     onManifest: vi.fn(),
+    onStreamInfoUpdated: vi.fn(),
   };
 }
 
@@ -385,6 +390,7 @@ describe('PlayerPipeline webOS DASH', () => {
     requestFilters[0]?.(2, request);
     expect(configure).toHaveBeenCalledWith({
       streaming: { bufferingGoal: 30 },
+      mediaSource: { transmuxWorkerUrl: 'js/shaka-player.transmuxer-worker.js' },
       drm: {
         preferredKeySystems: [testCase.keySystem],
         servers: { [testCase.keySystem]: 'http://host/license' },
@@ -512,5 +518,539 @@ describe('PlayerPipeline webOS DASH', () => {
     } finally {
       CONFIG.PLAYER.DASH_SOURCE = previous;
     }
+  });
+});
+
+describe('PlayerPipeline webOS Live player setting', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    localStorage.clear();
+    cacheMocks.getCachedStreamMime.mockReset();
+    cacheMocks.setCachedStreamMime.mockReset();
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'webOS',
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('#EXTM3U\n')));
+  });
+
+  type ResponseFilter = (type: number, response: { data: ArrayBuffer }) => void;
+  let responseFilters: ResponseFilter[] = [];
+  let configureCalls: unknown[] = [];
+
+  function stubShaka(options: {
+    load?: () => Promise<void>;
+    supported?: boolean;
+    onAttach?: (video: HTMLVideoElement) => void;
+    variant?: Record<string, unknown>;
+  } = {}) {
+    responseFilters = [];
+    configureCalls = [];
+    const load = vi.fn(options.load ?? (() => Promise.resolve()));
+    class Player {
+      static isBrowserSupported(): boolean {
+        return options.supported ?? true;
+      }
+
+      addEventListener(): void {}
+      attach(video: HTMLVideoElement): Promise<void> {
+        options.onAttach?.(video);
+        return Promise.resolve();
+      }
+      configure(config: unknown): boolean {
+        configureCalls.push(config);
+        return true;
+      }
+      destroy(): Promise<void> {
+        return Promise.resolve();
+      }
+      getAudioTracks(): [] {
+        return [];
+      }
+      getNetworkingEngine() {
+        return {
+          registerRequestFilter: () => {},
+          registerResponseFilter: (filter: ResponseFilter) => responseFilters.push(filter),
+        };
+      }
+      getTextTracks(): [] {
+        return [];
+      }
+      getVariantTracks(): Array<Record<string, unknown>> {
+        return options.variant ? [{ active: true, ...options.variant }] : [];
+      }
+      seekRange(): { start: number; end: number } {
+        return { start: 100, end: 400 };
+      }
+      load = load;
+      selectAudioTrack(): void {}
+      selectTextTrack(): void {}
+    }
+    vi.stubGlobal('__shaka', {
+      Player,
+      net: { NetworkingEngine: { RequestType: { LICENSE: 2, SEGMENT: 1 } } },
+      polyfill: { installAll: vi.fn() },
+      util: { Error: { Severity: { CRITICAL: 2 } } },
+    });
+    return load;
+  }
+
+  async function pipelineFor(video: HTMLVideoElement, livePlayer: 'system' | 'shaka', catchup = false) {
+    const { StorageService } = await import('../services/storage-service');
+    StorageService.setLivePlayer(livePlayer);
+    const { PlayerPipeline } = await import('./player-pipeline');
+    const opts = { ...callbacks(), isCatchup: () => catchup };
+    const pipeline = new PlayerPipeline(opts);
+    pipeline.setVideoElement(video);
+    return Object.assign(pipeline, { opts });
+  }
+
+  function pathEvents(spy: ReturnType<typeof vi.spyOn>): string[] {
+    return spy.mock.calls.flat()
+      .filter((arg): arg is string => typeof arg === 'string' && arg.startsWith('event=playback.path.'));
+  }
+
+  it('plays live HLS natively with the system player', async () => {
+    const load = stubShaka();
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'system');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+
+    expect(video.querySelector('source')?.src).toBe('http://host/live/ch1.m3u8');
+    expect(video.play).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    expect(load).not.toHaveBeenCalled();
+    expect(pipeline.isShakaActive()).toBe(false);
+  });
+
+  it('plays live HLS through Shaka when Shaka Player is selected', async () => {
+    const load = stubShaka();
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+
+    await vi.waitFor(() => expect(load).toHaveBeenCalledWith('http://host/live/ch1.m3u8'));
+    expect(video.querySelector('source')).toBeNull();
+    expect(pipeline.isShakaActive()).toBe(true);
+  });
+
+  it('plays a cached HLS route through Shaka when Shaka Player is selected', async () => {
+    cacheMocks.getCachedStreamMime.mockResolvedValue('application/vnd.apple.mpegurl');
+    const load = stubShaka();
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka');
+
+    pipeline.load('http://host/live/ch1', null);
+
+    await vi.waitFor(() => expect(load).toHaveBeenCalledWith('http://host/live/ch1'));
+    expect(video.querySelector('source')).toBeNull();
+  });
+
+  it('keeps catch-up HLS on the system player', async () => {
+    const load = stubShaka();
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka', true);
+
+    pipeline.load('http://host/timeshift/ch1.m3u8', null);
+
+    expect(video.querySelector('source')?.src).toBe('http://host/timeshift/ch1.m3u8');
+    await Promise.resolve();
+    expect(load).not.toHaveBeenCalled();
+    expect(pipeline.isShakaActive()).toBe(false);
+  });
+
+  it('logs one Shaka path event for a Shaka tune', async () => {
+    stubShaka();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+
+    expect(pathEvents(logSpy)).toEqual(['event=playback.path.shaka']);
+    logSpy.mockRestore();
+  });
+
+  it('removes the previous native source before Shaka attaches', async () => {
+    const sourcesAtAttach: string[] = [];
+    const load = stubShaka({
+      onAttach: video => {
+        video.querySelectorAll('source').forEach(source => sourcesAtAttach.push(source.src));
+        if (video.getAttribute('src')) sourcesAtAttach.push(video.getAttribute('src')!);
+      },
+    });
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka');
+
+    pipeline.load('http://host/live/ch1.ts', null);
+    expect(video.querySelector('source')?.src).toBe('http://host/live/ch1.ts');
+    pipeline.load('http://host/live/ch2.m3u8', null);
+
+    await vi.waitFor(() => expect(load).toHaveBeenCalledWith('http://host/live/ch2.m3u8'));
+    expect(sourcesAtAttach).toEqual([]);
+  });
+
+  it.each([
+    { label: 'cannot transmux', error: { severity: 2, category: 3, code: 3018 } },
+    { label: 'rejects the manifest', error: { severity: 2, category: 4, code: 4032 } },
+  ])('falls back to the system player when Shaka $label', async ({ error }) => {
+    stubShaka({ load: () => Promise.reject(error) });
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+
+    await vi.waitFor(() =>
+      expect(video.querySelector('source')?.src).toBe('http://host/live/ch1.m3u8'));
+    expect(video.play).toHaveBeenCalled();
+    expect(pipeline.opts.onError).not.toHaveBeenCalled();
+    expect(pipeline.isShakaActive()).toBe(false);
+  });
+
+  it('falls back to the system player when Shaka cannot start', async () => {
+    stubShaka({ supported: false });
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+
+    await vi.waitFor(() =>
+      expect(video.querySelector('source')?.src).toBe('http://host/live/ch1.m3u8'));
+    expect(pipeline.opts.onError).not.toHaveBeenCalled();
+  });
+
+  it('reports a Shaka network error instead of falling back', async () => {
+    stubShaka({ load: () => Promise.reject({ severity: 2, category: 1, code: 1001 }) });
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+
+    await vi.waitFor(() => expect(pipeline.opts.onError).toHaveBeenCalledOnce());
+    expect(video.querySelector('source')).toBeNull();
+  });
+
+  const GUESSED = {
+    videoCodec: 'hvc1.2.4.L153.B0', audioCodec: 'mp4a.40.2', hdr: null,
+    frameRate: 6.25, channelsCount: 2,
+  };
+  const PROBED = {
+    videoCodec: 'hvc1', videoRange: 'PQ', frameRate: 50, audioCodec: 'ec-3', audioLayout: '5.1',
+  };
+  const tsSegment = () => {
+    const data = new Uint8Array(188 * 2);
+    data[0] = 0x47;
+    data[188] = 0x47;
+    return data.buffer;
+  };
+
+  it('replaces Shaka guesses with stream info read from the first TS segment', async () => {
+    tsInfoMock.parseTsInfo.mockReset().mockReturnValue(PROBED);
+    const load = stubShaka({ variant: GUESSED });
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+    await vi.waitFor(() => expect(load).toHaveBeenCalled());
+    responseFilters[0](1, { data: tsSegment() });
+    responseFilters[0](1, { data: tsSegment() });
+
+    expect(tsInfoMock.parseTsInfo).toHaveBeenCalledOnce();
+    expect(pipeline.opts.onStreamInfoUpdated).toHaveBeenCalledOnce();
+    expect(pipeline.streamInfo()).toEqual({
+      videoCodec: 'hvc1',
+      audioCodec: 'ec-3',
+      videoRange: 'PQ',
+      frameRate: 50,
+      audioChannels: '2',
+      audioLayout: '5.1',
+      audioAtmos: false,
+    });
+  });
+
+  it('logs the stream info it read for diagnostics', async () => {
+    tsInfoMock.parseTsInfo.mockReset().mockReturnValue(PROBED);
+    const load = stubShaka({ variant: GUESSED });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const pipeline = await pipelineFor(videoElement(), 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+    await vi.waitFor(() => expect(load).toHaveBeenCalled());
+    responseFilters[0](1, { data: tsSegment() });
+
+    expect(logSpy.mock.calls.flat()).toEqual(expect.arrayContaining([
+      'event=playback.shaka.stream.probed', 'range=PQ', 'fps=50', 'audio=ec-3', 'layout=5.1',
+    ]));
+    logSpy.mockRestore();
+  });
+
+  it('leaves non-TS segments and other request types unparsed', async () => {
+    tsInfoMock.parseTsInfo.mockReset().mockReturnValue(PROBED);
+    const load = stubShaka({ variant: GUESSED });
+    const pipeline = await pipelineFor(videoElement(), 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+    await vi.waitFor(() => expect(load).toHaveBeenCalled());
+    responseFilters[0](0, { data: tsSegment() });
+    responseFilters[0](1, { data: new Uint8Array([0, 0, 0, 0x18]).buffer });
+    responseFilters[0](1, { data: tsSegment() });
+
+    expect(tsInfoMock.parseTsInfo).not.toHaveBeenCalled();
+    expect(pipeline.streamInfo()?.audioCodec).toBe('mp4a.40.2');
+  });
+
+  it('drops the stream info read for a previous tune', async () => {
+    tsInfoMock.parseTsInfo.mockReset().mockReturnValue(PROBED);
+    const load = stubShaka({ variant: GUESSED });
+    const pipeline = await pipelineFor(videoElement(), 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    responseFilters[0](1, { data: tsSegment() });
+    pipeline.load('http://host/live/ch2.m3u8', null);
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+
+    expect(pipeline.streamInfo()?.videoRange).toBe('');
+    expect(pipeline.streamInfo()?.audioCodec).toBe('mp4a.40.2');
+  });
+
+  it('reports Shaka\'s live window as the seekable range while Shaka plays', async () => {
+    const load = stubShaka();
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, 'shaka');
+    expect(pipeline.liveSeekable()).toBeNull();
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+    await vi.waitFor(() => expect(load).toHaveBeenCalled());
+
+    const range = pipeline.liveSeekable();
+    expect([range?.length, range?.start(0), range?.end(0)]).toEqual([1, 100, 400]);
+  });
+
+  it('keeps a smaller buffer for Shaka live HLS so 4K fits in TV memory', async () => {
+    const load = stubShaka();
+    const pipeline = await pipelineFor(videoElement(), 'shaka');
+
+    pipeline.load('http://host/live/ch1.m3u8', null);
+    await vi.waitFor(() => expect(load).toHaveBeenCalled());
+
+    const { CONFIG } = await import('../config');
+    expect(configureCalls[0]).toMatchObject({
+      streaming: {
+        bufferingGoal: CONFIG.PLAYER.SHAKA_LIVE_BUFFER_AHEAD,
+        bufferBehind: CONFIG.PLAYER.SHAKA_LIVE_BUFFER_BEHIND,
+      },
+    });
+  });
+});
+
+describe('PlayerPipeline webOS mpegts.js live player', () => {
+  type Listener = (...args: unknown[]) => void;
+
+  class FakeMpegtsPlayer {
+    readonly listeners = new Map<string, Listener>();
+    readonly attachMediaElement = vi.fn();
+    readonly load = vi.fn();
+    readonly play = vi.fn();
+    readonly destroy = vi.fn();
+    mediaInfo: Record<string, unknown> | undefined;
+
+    on(event: string, listener: Listener): void {
+      this.listeners.set(event, listener);
+    }
+
+    emit(event: string, ...args: unknown[]): void {
+      this.listeners.get(event)?.(...args);
+    }
+  }
+
+  let players: FakeMpegtsPlayer[] = [];
+  const createPlayer = vi.fn((_source: { url: string }, _config?: Record<string, unknown>) => {
+    const player = new FakeMpegtsPlayer();
+    players.push(player);
+    return player;
+  });
+
+  beforeEach(() => {
+    vi.resetModules();
+    localStorage.clear();
+    players = [];
+    createPlayer.mockClear();
+    cacheMocks.getCachedStreamMime.mockReset();
+    cacheMocks.setCachedStreamMime.mockReset();
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'webOS',
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('#EXTM3U\n')));
+    vi.stubGlobal('__mpegts', {
+      Events: { ERROR: 'error', MEDIA_INFO: 'media_info' },
+    BaseLoader: class {},
+    LoaderStatus: { kIdle: 0, kConnecting: 1, kBuffering: 2, kError: 3, kComplete: 4 },
+    LoaderErrors: { EXCEPTION: 'Exception', HTTP_STATUS_CODE_INVALID: 'HttpStatusCodeInvalid' },
+      ErrorTypes: { NETWORK_ERROR: 'NetworkError', MEDIA_ERROR: 'MediaError' },
+      isSupported: () => true,
+      createPlayer,
+    });
+  });
+
+  async function pipelineFor(video: HTMLVideoElement, catchup = false) {
+    const { StorageService } = await import('../services/storage-service');
+    StorageService.setLivePlayer('mpegts');
+    const { PlayerPipeline } = await import('./player-pipeline');
+    const opts = { ...callbacks(), isCatchup: () => catchup };
+    const pipeline = new PlayerPipeline(opts);
+    pipeline.setVideoElement(video);
+    return Object.assign(pipeline, { opts });
+  }
+
+  it('plays live HLS through mpegts.js with its segment loader', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const video = videoElement();
+    const pipeline = await pipelineFor(video);
+
+    pipeline.load('http://host/live/u1/p1/101.m3u8', null);
+
+    await vi.waitFor(() => expect(createPlayer).toHaveBeenCalledOnce());
+    expect(createPlayer.mock.calls[0][0]).toEqual({ type: 'mpegts', isLive: true, url: 'http://host/live/u1/p1/101.m3u8' });
+    expect(createPlayer.mock.calls[0][1]).toMatchObject({
+      enableWorker: false,
+      customLoader: expect.any(Function),
+      autoCleanupSourceBuffer: true,
+      autoCleanupMaxBackwardDuration: 20,
+      autoCleanupMinBackwardDuration: 10,
+    });
+    expect(players[0].attachMediaElement).toHaveBeenCalledWith(video);
+    expect(players[0].load).toHaveBeenCalledOnce();
+    expect(video.querySelector('source')).toBeNull();
+    expect(pipeline.isMseActive()).toBe(true);
+    expect(pipeline.isShakaActive()).toBe(false);
+    expect(logSpy.mock.calls.flat()).toEqual(expect.arrayContaining(
+      ['event=playback.path.mpegts', 'source=hls']));
+    logSpy.mockRestore();
+  });
+
+  it('plays a TS channel through mpegts.js in its worker', async () => {
+    const video = videoElement();
+    const pipeline = await pipelineFor(video);
+
+    pipeline.load('http://host/live/u1/p1/101.ts', null);
+
+    await vi.waitFor(() => expect(createPlayer).toHaveBeenCalledOnce());
+    expect(createPlayer.mock.calls[0][0].url).toBe('http://host/live/u1/p1/101.ts');
+    expect(createPlayer.mock.calls[0][1]).toMatchObject({ enableWorker: true });
+    expect(createPlayer.mock.calls[0][1]).not.toHaveProperty('customLoader');
+  });
+
+  it('keeps other containers on the system player', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const video = videoElement();
+    const pipeline = await pipelineFor(video);
+
+    pipeline.load('http://host/live/ch1.flv', null);
+
+    expect(video.querySelector('source')?.src).toBe('http://host/live/ch1.flv');
+    expect(logSpy.mock.calls.flat()).toEqual(expect.arrayContaining(
+      ['event=playback.mpegts.skipped', 'reason=container']));
+    await Promise.resolve();
+    expect(createPlayer).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+
+  it('keeps catch-up on the system player', async () => {
+    const video = videoElement();
+    const pipeline = await pipelineFor(video, true);
+
+    pipeline.load('http://host/timeshift/u1/p1/60/2024-01-01:10-00/101.ts', null);
+
+    expect(video.querySelector('source')?.src).toBe('http://host/timeshift/u1/p1/60/2024-01-01:10-00/101.ts');
+    await Promise.resolve();
+    expect(createPlayer).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the original URL on the system player after a media error', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const video = videoElement();
+    const pipeline = await pipelineFor(video);
+
+    pipeline.load('http://host/live/u1/p1/101.m3u8', null);
+    await vi.waitFor(() => expect(createPlayer).toHaveBeenCalledOnce());
+    players[0].emit('error', 'MediaError', 'MediaMSEError');
+
+    await vi.waitFor(() =>
+      expect(video.querySelector('source')?.src).toBe('http://host/live/u1/p1/101.m3u8'));
+    expect(players[0].destroy).toHaveBeenCalled();
+    expect(pipeline.opts.onError).not.toHaveBeenCalled();
+    expect(pipeline.isMseActive()).toBe(false);
+    expect(warnSpy.mock.calls.flat()).toEqual(expect.arrayContaining(
+      ['event=playback.mpegts.fallback', 'reason=content']));
+    vi.restoreAllMocks();
+  });
+
+  it('reports a network error for the normal reconnect path', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const video = videoElement();
+    const pipeline = await pipelineFor(video);
+
+    pipeline.load('http://host/live/u1/p1/101.ts', null);
+    await vi.waitFor(() => expect(createPlayer).toHaveBeenCalledOnce());
+    players[0].emit('error', 'NetworkError', 'HttpStatusCodeInvalid');
+
+    expect(pipeline.opts.onError).toHaveBeenCalledOnce();
+    expect(video.querySelector('source')).toBeNull();
+    vi.restoreAllMocks();
+  });
+
+  it('falls back to the system player when mpegts.js is unsupported', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('__mpegts', { isSupported: () => false, createPlayer });
+    const video = videoElement();
+    const pipeline = await pipelineFor(video);
+
+    pipeline.load('http://host/live/u1/p1/101.m3u8', null);
+
+    await vi.waitFor(() =>
+      expect(video.querySelector('source')?.src).toBe('http://host/live/u1/p1/101.m3u8'));
+    expect(createPlayer).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it('reports stream info and the buffered live window', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const video = videoElement();
+    Object.defineProperty(video, 'buffered', {
+      value: { length: 1, start: () => 100, end: () => 130 },
+    });
+    const pipeline = await pipelineFor(video);
+
+    pipeline.load('http://host/live/u1/p1/101.ts', null);
+    await vi.waitFor(() => expect(createPlayer).toHaveBeenCalledOnce());
+    players[0].mediaInfo = { videoCodec: 'hvc1.2.4.L153.B0', audioCodec: 'ec-3', fps: 50, audioChannelCount: 6 };
+    players[0].emit('media_info');
+
+    expect(pipeline.opts.onStreamInfoUpdated).toHaveBeenCalledOnce();
+    expect(pipeline.streamInfo()).toEqual({
+      videoCodec: 'hvc1.2.4.L153.B0', audioCodec: 'ec-3', videoRange: '', frameRate: 50, audioChannels: '6',
+    });
+    expect(logSpy.mock.calls.flat()).toEqual(expect.arrayContaining(
+      ['event=playback.mpegts.media.info', 'audioCodec=ec-3']));
+    const range = pipeline.liveSeekable();
+    expect([range?.start(0), range?.end(0)]).toEqual([100, 130]);
+    logSpy.mockRestore();
+  });
+
+  it('destroys the mpegts.js player on the next tune', async () => {
+    const video = videoElement();
+    const pipeline = await pipelineFor(video);
+
+    pipeline.load('http://host/live/u1/p1/101.ts', null);
+    await vi.waitFor(() => expect(createPlayer).toHaveBeenCalledOnce());
+    pipeline.load('http://host/live/u1/p1/102.ts', null);
+
+    expect(players[0].destroy).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(createPlayer).toHaveBeenCalledTimes(2));
   });
 });

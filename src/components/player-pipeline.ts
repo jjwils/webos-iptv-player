@@ -2,6 +2,7 @@ import type { AudioOption, ManifestAudio, ManifestClosedCaption, ManifestSubtitl
 import { CONFIG } from '../config';
 import { getCachedStreamMime, setCachedStreamMime } from '../services/idb-cache';
 import { parseMpd, type MpdManifest } from '../parsers/mpd-manifest';
+import { parseTsInfo, type TsInfo } from '../parsers/ts-info';
 import {
   parseDrmConfig,
   isShakaDrmConfig,
@@ -9,8 +10,12 @@ import {
   type ShakaDrmConfig,
 } from '../services/drm-config';
 import { PlayReadyDrm } from '../services/playready-drm';
+import { createHlsTsLoaderClass, type HlsLiveState } from '../services/mpegts-hls-loader';
+import { loadMpegts } from '../services/mpegts-loader';
 import { loadShaka, type ShakaNamespaceLike } from '../services/shaka-loader';
+import { StorageService } from '../services/storage-service';
 import { parseAudioRenditions } from '../utils/audio-tracks';
+import type { TimeRangesLike } from '../utils/dvr';
 import { FetchTextError, fetchLimitedText } from '../utils/fetch-helper';
 import { getLenientLoaders } from '../utils/hls-stable-loader';
 import { createLogger } from '../utils/logger';
@@ -19,6 +24,7 @@ import { parseClosedCaptions, parseSubtitleRenditions } from '../utils/subtitle-
 import { parseVariants, type StreamVariant } from '../utils/stream-info';
 import { mediaOptionSourceType } from '../utils/webos-media-option';
 import { createHlsEngine } from './mse/hls-engine';
+import { createMpegtsEngine, type MpegtsMediaInfo } from './mse/mpegts-engine';
 import type { MseEngine, PipelineStreamInfo } from './mse/engine';
 import { createShakaEngine, type ShakaPlayerLike } from './mse/shaka-engine';
 import {
@@ -35,12 +41,38 @@ import {
 const log = createLogger('Player');
 
 
-// Desktop HLS/MPEG-TS libraries are globals from preview-libs.js. Shaka is also
-// a global, but webOS loads its separate bundle only for Widevine/ClearKey.
+// Desktop hls.js is a global from preview-libs.js. Shaka and the patched
+// mpegts.js load their own bundles on demand, on webOS and desktop alike.
 const win = window as unknown as Record<string, unknown>;
 
 type HlsType = typeof import('hls.js').default;
-type MpegtsType = typeof import('mpegts.js').default;
+
+interface LoadOptions {
+  direct?: boolean;
+  // Set when the Live player setting's library could not play a live tune.
+  systemPlayer?: boolean;
+}
+
+type EngineKind = 'hls' | 'shaka' | 'mpegts';
+type MpegtsConfig = NonNullable<Parameters<typeof import('mpegts.js').default.createPlayer>[1]>;
+
+interface LiveFallback {
+  fallback(): void;
+}
+
+// mpegts.js keeps three minutes behind the playhead by default; a 4K stream
+// would hold several hundred MB.
+const MPEGTS_CONFIG = {
+  enableWorker: true,
+  lazyLoad: false,
+  autoCleanupSourceBuffer: true,
+  autoCleanupMaxBackwardDuration: CONFIG.PLAYER.MPEGTS_BUFFER_BEHIND_MAX,
+  autoCleanupMinBackwardDuration: CONFIG.PLAYER.MPEGTS_BUFFER_BEHIND_MIN,
+};
+
+// shaka.util.Error.Category values for content Shaka cannot parse or transmux.
+const SHAKA_MEDIA_CATEGORY = 3;
+const SHAKA_MANIFEST_CATEGORY = 4;
 
 interface ShakaError {
   category?: number;
@@ -53,12 +85,21 @@ interface ShakaRequest {
   headers: Record<string, string>;
 }
 
+interface ShakaResponse {
+  data: ArrayBuffer | ArrayBufferView;
+}
+
+// Bounds the main-thread scan of a segment; the first frames carry what the OSD needs.
+const TS_PROBE_BYTES = 4 * 1024 * 1024;
+const TS_PROBE_ATTEMPTS = 3;
+
 interface ShakaPlayerRuntime extends ShakaPlayerLike {
   addEventListener(type: string, listener: (event: Event) => void): void;
   attach(video: HTMLVideoElement): Promise<void>;
   configure(config: Record<string, unknown>): boolean;
   getNetworkingEngine(): {
     registerRequestFilter(filter: (type: number, request: ShakaRequest) => void): void;
+    registerResponseFilter?(filter: (type: number, response: ShakaResponse) => void): void;
   } | null;
   load(url: string): Promise<void>;
   getDrmInfo?(): { keySystem: string } | null;
@@ -80,6 +121,7 @@ interface ShakaNamespace extends ShakaNamespaceLike {
     NetworkingEngine?: {
       RequestType?: {
         LICENSE?: number;
+        SEGMENT?: number;
       };
     };
   };
@@ -129,13 +171,15 @@ export interface PlayerPipelineOptions {
   onAudioTracksUpdated: () => void;
   onSubtitleTracksUpdated: () => void;
   onManifest: (manifest: PipelineManifest) => void;
+  onStreamInfoUpdated: () => void;
 }
 
 export class PlayerPipeline {
   private videoEl: HTMLVideoElement | null = null;
   private hls: InstanceType<HlsType> | null = null;
-  private mpegtsPlayer: { destroy(): void } | null = null;
   private engine: MseEngine | null = null;
+  private engineKind: EngineKind | null = null;
+  private tsInfo: TsInfo | null = null;
   private engineTeardown: { promise: Promise<void>; label: string } | null = null;
   private msePending = false;
   private loadToken = 0;
@@ -166,6 +210,18 @@ export class PlayerPipeline {
     return this.engine !== null || this.msePending;
   }
 
+  isShakaActive(): boolean {
+    return this.engine !== null && this.engineKind === 'shaka';
+  }
+
+  // Shaka and mpegts.js never set a live seekable range on the MediaSource,
+  // so video.seekable follows the buffer as it grows and is evicted.
+  liveSeekable(): TimeRangesLike | null {
+    const range = this.engine?.seekRange?.();
+    if (!range) return null;
+    return { length: 1, start: () => range.start, end: () => range.end };
+  }
+
   mseAudioOptions(): AudioOption[] {
     return this.engine?.audioOptions() ?? [];
   }
@@ -183,14 +239,26 @@ export class PlayerPipeline {
   }
 
   streamInfo(): PipelineStreamInfo | null {
-    return this.engine?.streamInfo() ?? null;
+    const info = this.engine?.streamInfo() ?? null;
+    const probed = this.tsInfo;
+    if (!probed || !this.isShakaActive()) return info;
+    // Shaka guesses these when the playlist omits them; the segment is authoritative.
+    return {
+      videoCodec: probed.videoCodec || info?.videoCodec || '',
+      audioCodec: probed.audioCodec || info?.audioCodec || '',
+      videoRange: probed.videoRange || info?.videoRange || '',
+      frameRate: probed.frameRate || info?.frameRate || 0,
+      audioChannels: info?.audioChannels ?? '',
+      audioLayout: probed.audioLayout,
+      audioAtmos: info?.audioAtmos,
+    };
   }
 
   drmLabel(): string {
     return this.activeDrm;
   }
 
-  load(url: string, extras: Record<string, string> | null, opts?: { direct?: boolean }): void {
+  load(url: string, extras: Record<string, string> | null, opts?: LoadOptions): void {
     const videoEl = this.videoEl;
     if (!videoEl) return;
     const token = ++this.loadToken;
@@ -242,7 +310,7 @@ export class PlayerPipeline {
     url: string,
     extras: Record<string, string> | null,
     token: number,
-    opts?: { direct?: boolean },
+    opts?: LoadOptions,
   ): void {
     const videoEl = this.videoEl;
     if (!videoEl) return;
@@ -271,6 +339,7 @@ export class PlayerPipeline {
           : isTsUrl ? 'video/mp2t'
           : isDashUrl ? 'application/dash+xml'
           : 'application/vnd.apple.mpegurl';
+        if (this.loadWebOSLivePlayer(url, mime, extras, token, opts, 'url')) return;
         log.info('Selected webOS native playback', 'event=playback.path.native',
           this.callbacks.playbackLabel(token),
           'reason=url', 'url=', safeUrl,
@@ -289,6 +358,7 @@ export class PlayerPipeline {
       void getCachedStreamMime(routeKey).then(cachedMime => {
         if (token !== this.loadToken || !this.videoEl) return;
         if (cachedMime) {
+          if (this.loadWebOSLivePlayer(url, cachedMime, extras, token, opts, 'cache')) return;
           log.info('Selected webOS native playback', 'event=playback.path.native',
             this.callbacks.playbackLabel(token),
             'reason=cache', 'url=', safeUrl,
@@ -310,6 +380,7 @@ export class PlayerPipeline {
               contentType.split(';')[0].trim() !== 'application/octet-stream') {
             void setCachedStreamMime(routeKey, mime);
           }
+          if (this.loadWebOSLivePlayer(url, mime, extras, token, opts, 'probe')) return;
           log.info('Selected webOS native playback', 'event=playback.path.native',
             this.callbacks.playbackLabel(token),
             'reason=probe', 'url=', safeUrl,
@@ -403,16 +474,18 @@ export class PlayerPipeline {
 
   private destroyLoaders(): void {
     this.msePending = false;
+    this.tsInfo = null;
     // The engine owns its library instance, hls.js included.
     if (this.engine) {
       const engine = this.engine;
       const label = this.videoEl ? this.videoLabel(this.videoEl)
         : this.callbacks.playbackLabel(this.loadToken);
-      const source = this.hls ? 'hls' : 'shaka';
+      const source = this.engineKind ?? 'unknown';
       const startedAt = Date.now();
       log.info('Destroying MSE engine', 'event=playback.mse.destroy.started',
         label, `source=${source}`);
       this.engine = null;
+      this.engineKind = null;
       const teardown = engine.destroy();
       const completed = () => {
         log.info('MSE engine destroyed', 'event=playback.mse.destroy.completed',
@@ -435,10 +508,6 @@ export class PlayerPipeline {
       }
     }
     this.hls = null;
-    if (this.mpegtsPlayer) {
-      this.mpegtsPlayer.destroy();
-      this.mpegtsPlayer = null;
-    }
   }
 
   // Classify a stream by the server's Content-Type — URL extensions are
@@ -487,6 +556,40 @@ export class PlayerPipeline {
       if (reader) void reader.cancel().catch(() => {});
       clearTimeout(timer);
     }
+  }
+
+  // The Live player setting hands webOS live streams to an MSE library whose
+  // transmuxer plays E-AC-3 that the system pipeline drops. mpegts.js reads
+  // HLS through its own segment loader (services/mpegts-hls-loader.ts).
+  private loadWebOSLivePlayer(
+    url: string,
+    mime: string,
+    extras: Record<string, string> | null,
+    token: number,
+    opts: LoadOptions | undefined,
+    reason: string,
+  ): boolean {
+    const livePlayer = StorageService.getLivePlayer();
+    if (opts?.systemPlayer || this.callbacks.isCatchup() || livePlayer === 'system') return false;
+    const live: LiveFallback = { fallback: () => this.load(url, extras, { systemPlayer: true }) };
+    const isHls = mime === 'application/vnd.apple.mpegurl';
+    if (livePlayer === 'shaka') {
+      if (!isHls) return false;
+      log.info('Selected Shaka playback', 'event=playback.path.shaka',
+        this.callbacks.playbackLabel(token), `reason=${reason}`, 'livePlayer=shaka');
+      this.loadWithShaka(url, token, null, live);
+      return true;
+    }
+    if (!isHls && mime !== 'video/mp2t') {
+      log.info('mpegts.js cannot play this stream; using the system player',
+        'event=playback.mpegts.skipped', this.callbacks.playbackLabel(token), 'reason=container');
+      return false;
+    }
+    log.info('Selected mpegts.js playback', 'event=playback.path.mpegts',
+      this.callbacks.playbackLabel(token), `reason=${reason}`, 'livePlayer=mpegts',
+      `source=${isHls ? 'hls' : 'ts'}`);
+    this.loadWithMpegts(url, false, token, live, isHls);
+    return true;
   }
 
   // DASH keeps application/dash+xml for classification and uses mediaOption on
@@ -639,6 +742,7 @@ export class PlayerPipeline {
       const hls = new Hls(hlsConfig);
       this.hls = hls;
       this.engine = createHlsEngine(hls);
+      this.engineKind = 'hls';
       hls.loadSource(url);
       hls.attachMedia(this.videoEl);
       // The audio/subtitle track lists aren't ready at MANIFEST_PARSED — hls.js
@@ -695,23 +799,36 @@ export class PlayerPipeline {
     url: string,
     loadToken: number,
     drm: ShakaDrmConfig | null = null,
+    liveHls: LiveFallback | null = null,
   ): void {
     if (!this.videoEl) return;
     this.msePending = true;
     const label = this.callbacks.playbackLabel(loadToken);
     const startedAt = Date.now();
-    log.info('Initializing Shaka', 'event=playback.dash.init.started',
+    log.info('Initializing Shaka', 'event=playback.shaka.init.started',
       label, `drm=${drm?.type || 'none'}`);
     void loadShaka().then(loaded => {
       if (loadToken !== this.loadToken || !this.videoEl) return;
       const shaka = loaded as ShakaNamespace;
       const videoEl = this.videoEl;
+      // Shaka appends its own <source>; one left by a native tune would win.
+      videoEl.removeAttribute('src');
+      videoEl.innerHTML = '';
       const player = new shaka.Player();
       const engine = createShakaEngine(player);
       this.engine = engine;
+      this.engineKind = 'shaka';
       this.msePending = false;
+      this.probeTsSegments(player, shaka, loadToken, engine);
       const config: Record<string, unknown> = {
-        streaming: { bufferingGoal: CONFIG.PLAYER.BUFFER_LENGTH },
+        streaming: liveHls
+          ? {
+            bufferingGoal: CONFIG.PLAYER.SHAKA_LIVE_BUFFER_AHEAD,
+            bufferBehind: CONFIG.PLAYER.SHAKA_LIVE_BUFFER_BEHIND,
+          }
+          : { bufferingGoal: CONFIG.PLAYER.BUFFER_LENGTH },
+        // Keeps TS-to-MP4 transmuxing off the UI thread.
+        mediaSource: { transmuxWorkerUrl: 'js/shaka-player.transmuxer-worker.js' },
       };
       if (drm) {
         const keySystem = drm.type === 'clearkey' ? 'org.w3.clearkey' : 'com.widevine.alpha';
@@ -752,7 +869,7 @@ export class PlayerPipeline {
       const notifyAudioTracks = (event: Event) => {
         if (loadToken === this.loadToken && this.engine === engine) {
           const info = engine.streamInfo();
-          log.info('Shaka variant changed', 'event=playback.dash.variant.changed',
+          log.info('Shaka variant changed', 'event=playback.shaka.variant.changed',
             label, `reason=${event.type}`,
             `width=${videoEl.videoWidth} height=${videoEl.videoHeight}`,
             `videoCodec=${info?.videoCodec || 'unknown'}`,
@@ -779,9 +896,14 @@ export class PlayerPipeline {
       const reportCriticalError = (error: unknown) => {
         if (reportedCriticalError || loadToken !== this.loadToken) return;
         reportedCriticalError = true;
-        log.warn('Shaka critical error', 'event=playback.dash.error',
+        log.warn('Shaka critical error', 'event=playback.shaka.error',
           this.callbacks.playbackLabel(loadToken), shakaErrorDetail(error));
-        if (isPermanentShakaLicenseError(error, shaka)) {
+        const category = (error as ShakaError | null)?.category;
+        if (liveHls && (category === SHAKA_MEDIA_CATEGORY || category === SHAKA_MANIFEST_CATEGORY)) {
+          log.warn('Shaka cannot play this stream; using the system player',
+            'event=playback.shaka.fallback', this.callbacks.playbackLabel(loadToken), 'reason=content');
+          liveHls.fallback();
+        } else if (isPermanentShakaLicenseError(error, shaka)) {
           this.callbacks.onError('unsupported');
         } else {
           this.callbacks.onError();
@@ -789,7 +911,7 @@ export class PlayerPipeline {
       };
       player.addEventListener('error', event => {
         const error = (event as CustomEvent<ShakaError>).detail;
-        log.warn('Shaka error', 'event=playback.dash.error',
+        log.warn('Shaka error', 'event=playback.shaka.error',
           this.callbacks.playbackLabel(loadToken), shakaErrorDetail(error));
         if (error?.severity === shaka.util.Error.Severity.CRITICAL) {
           reportCriticalError(error);
@@ -798,7 +920,7 @@ export class PlayerPipeline {
 
       void player.attach(videoEl).then(() => {
         if (loadToken !== this.loadToken || this.engine !== engine) return;
-        log.info('Shaka attached; loading stream', 'event=playback.dash.load.started',
+        log.info('Shaka attached; loading stream', 'event=playback.shaka.load.started',
           label, `elapsedMs=${Date.now() - startedAt}`);
         return player.load(url);
       }).then(() => {
@@ -807,7 +929,7 @@ export class PlayerPipeline {
         this.activeDrm = drm?.type === 'clearkey' || (!drm && keySystem === 'org.w3.clearkey')
           ? 'ClearKey'
           : drm?.type === 'widevine' || keySystem === 'com.widevine.alpha' ? 'Widevine' : '';
-        log.info('Shaka stream loaded', 'event=playback.dash.load.completed',
+        log.info('Shaka stream loaded', 'event=playback.shaka.load.completed',
           label, `elapsedMs=${Date.now() - startedAt}`,
           `keySystem=${keySystem || 'none'}`, `mediaKeys=${Boolean(videoEl.mediaKeys)}`,
           this.callbacks.mediaState(videoEl));
@@ -820,7 +942,7 @@ export class PlayerPipeline {
         this.callbacks.onSubtitleTracksUpdated();
         videoEl.play().catch(error => log.warn('Shaka play() rejected',
           'event=playback.play.rejected',
-          this.callbacks.playbackLabel(loadToken), 'path=dash', shakaErrorDetail(error)));
+          this.callbacks.playbackLabel(loadToken), 'path=shaka', shakaErrorDetail(error)));
       }).catch(error => {
         if (loadToken !== this.loadToken || this.engine !== engine) return;
         this.destroyLoaders();
@@ -831,44 +953,141 @@ export class PlayerPipeline {
       this.msePending = false;
       this.destroyLoaders();
       log.warn('Shaka initialization failed',
-        'event=playback.dash.init.failed', this.callbacks.playbackLabel(loadToken), shakaErrorDetail(error));
-      this.callbacks.onError();
+        'event=playback.shaka.init.failed', this.callbacks.playbackLabel(loadToken), shakaErrorDetail(error));
+      if (liveHls) {
+        log.warn('Shaka cannot play this stream; using the system player',
+          'event=playback.shaka.fallback', this.callbacks.playbackLabel(loadToken), 'reason=init');
+        liveHls.fallback();
+      } else {
+        this.callbacks.onError();
+      }
     });
   }
 
-  private loadWithMpegts(url: string, isFlv: boolean, loadToken: number): void {
-    if (!this.videoEl) return;
-    const mpegts = win.__mpegts as MpegtsType | undefined;
-    try {
-      if (!mpegts?.isSupported()) {
-      log.warn('mpegts.js unsupported; using direct playback',
-        'event=playback.path.direct', this.callbacks.playbackLabel(loadToken),
-        'reason=mpegts-unsupported');
-      this.videoEl.src = url;
-        this.videoEl.play().catch(() => {});
+  private probeTsSegments(
+    player: ShakaPlayerRuntime,
+    shaka: ShakaNamespace,
+    loadToken: number,
+    engine: MseEngine,
+  ): void {
+    const segmentType = shaka.net?.NetworkingEngine?.RequestType?.SEGMENT;
+    const networking = player.getNetworkingEngine();
+    if (segmentType === undefined || !networking?.registerResponseFilter) return;
+    let attempts = 0;
+    networking.registerResponseFilter((type, response) => {
+      if (type !== segmentType || attempts >= TS_PROBE_ATTEMPTS
+          || loadToken !== this.loadToken || this.engine !== engine) return;
+      const data = response.data;
+      const bytes = data instanceof ArrayBuffer
+        ? new Uint8Array(data, 0, Math.min(data.byteLength, TS_PROBE_BYTES))
+        : new Uint8Array(data.buffer, data.byteOffset, Math.min(data.byteLength, TS_PROBE_BYTES));
+      if (bytes[0] !== 0x47) {
+        attempts = TS_PROBE_ATTEMPTS;
         return;
       }
-      const player = mpegts.createPlayer({
-        type: isFlv ? 'flv' : 'mpegts',
-        isLive: true,
-        url,
+      attempts++;
+      let info: TsInfo | null = null;
+      try {
+        info = parseTsInfo(bytes.subarray(0, bytes.length - (bytes.length % 188)));
+      } catch {
+        // A malformed segment leaves Shaka's own stream info in place.
+      }
+      if (!info) return;
+      attempts = TS_PROBE_ATTEMPTS;
+      this.tsInfo = info;
+      log.info('Read stream info from segment', 'event=playback.shaka.stream.probed',
+        this.callbacks.playbackLabel(loadToken), `video=${info.videoCodec || 'none'}`,
+        `range=${info.videoRange || 'sdr'}`, `fps=${info.frameRate}`,
+        `audio=${info.audioCodec || 'none'}`, `layout=${info.audioLayout || 'unknown'}`);
+      this.callbacks.onStreamInfoUpdated();
+    });
+  }
+
+  private loadWithMpegts(
+    url: string,
+    isFlv: boolean,
+    loadToken: number,
+    live: LiveFallback | null = null,
+    hls = false,
+  ): void {
+    if (!this.videoEl) return;
+    this.msePending = true;
+    const label = this.callbacks.playbackLabel(loadToken);
+    const direct = (reason: string) => {
+      const videoEl = this.videoEl;
+      if (!videoEl) return;
+      if (live) {
+        log.warn('mpegts.js cannot play this stream; using the system player',
+          'event=playback.mpegts.fallback', label, `reason=${reason}`);
+        live.fallback();
+        return;
+      }
+      log.warn('mpegts.js unavailable; using direct playback',
+        'event=playback.path.direct', label, `reason=${reason}`);
+      videoEl.src = url;
+      videoEl.play().catch(() => {});
+    };
+    void loadMpegts().then(mpegts => {
+      if (loadToken !== this.loadToken || !this.videoEl) return;
+      this.msePending = false;
+      const videoEl = this.videoEl;
+      if (!mpegts.isSupported()) {
+        direct('mpegts-unsupported');
+        return;
+      }
+      // A <source> left by a native tune would win over the MediaSource.
+      videoEl.removeAttribute('src');
+      videoEl.innerHTML = '';
+      const liveState: HlsLiveState = {
+        liveDelay: 0,
+        bufferedAhead: () => {
+          const buffered = videoEl.buffered;
+          return buffered.length ? buffered.end(buffered.length - 1) - videoEl.currentTime : 0;
+        },
+      };
+      // A custom loader cannot cross into mpegts.js's worker, so HLS transmuxes on this thread.
+      const config = hls
+        ? {
+          ...MPEGTS_CONFIG,
+          enableWorker: false,
+          customLoader: createHlsTsLoaderClass(mpegts, liveState) as unknown as MpegtsConfig['customLoader'],
+        }
+        : MPEGTS_CONFIG;
+      const player = mpegts.createPlayer({ type: isFlv ? 'flv' : 'mpegts', isLive: true, url }, config);
+      const engine = createMpegtsEngine(player, videoEl,
+        () => (player.mediaInfo as MpegtsMediaInfo | undefined) ?? null, () => liveState.liveDelay);
+      this.engine = engine;
+      this.engineKind = 'mpegts';
+      player.on(mpegts.Events.MEDIA_INFO, () => {
+        if (loadToken !== this.loadToken || this.engine !== engine) return;
+        const info = engine.streamInfo();
+        log.info('mpegts.js stream info', 'event=playback.mpegts.media.info', label,
+          `videoCodec=${info?.videoCodec || 'none'}`, `audioCodec=${info?.audioCodec || 'none'}`,
+          `frameRate=${info?.frameRate || 0}`, `audioChannels=${info?.audioChannels || 'unknown'}`);
+        this.callbacks.onStreamInfoUpdated();
       });
-      this.mpegtsPlayer = player;
-      player.attachMediaElement(this.videoEl);
+      player.on(mpegts.Events.ERROR, (type: string, detail: string) => {
+        if (loadToken !== this.loadToken || this.engine !== engine) return;
+        log.error('mpegts.js playback error', 'event=playback.mpegts.error', label,
+          `type=${type}`, `detail=${detail}`);
+        if (live && type === mpegts.ErrorTypes.MEDIA_ERROR) {
+          this.destroyLoaders();
+          direct('content');
+        } else {
+          this.callbacks.onError();
+        }
+      });
+      player.attachMediaElement(videoEl);
       player.load();
-      player.play();
-      player.on(mpegts.Events.ERROR, () => {
-        if (loadToken !== this.loadToken) return;
-        log.error('mpegts.js playback error', 'event=playback.mpegts.error',
-          this.callbacks.playbackLabel(loadToken));
-        this.callbacks.onError();
-      });
-    } catch (error) {
-      log.warn('mpegts.js initialization failed; using direct playback',
-        'event=playback.mpegts.init.failed', this.callbacks.playbackLabel(loadToken), error);
-      this.videoEl.src = url;
-      this.videoEl.play().catch(() => {});
-    }
+      void Promise.resolve(player.play()).catch(error => log.warn('mpegts.js play() rejected',
+        'event=playback.play.rejected', label, 'path=mpegts', error));
+    }).catch(error => {
+      if (loadToken !== this.loadToken) return;
+      this.msePending = false;
+      this.destroyLoaders();
+      log.warn('mpegts.js initialization failed', 'event=playback.mpegts.init.failed', label, error);
+      direct('init');
+    });
   }
 
   // Fetch the HLS master once and parse its audio + subtitle rendition names so

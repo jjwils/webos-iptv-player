@@ -7,6 +7,8 @@ export interface PipelineStreamInfo {
   frameRate: number;
   audioChannels: string;
   audioAtmos?: boolean;
+  // "<main>.<lfe>" read from the stream, e.g. "5.1".
+  audioLayout?: string;
 }
 
 // The desktop preview plays through an MSE library — hls.js or Shaka — which
@@ -18,5 +20,7 @@ export interface MseEngine {
   subtitleOptions(): SubtitleOption[];
   setSubtitleTrack(index: number): boolean;
   streamInfo(): PipelineStreamInfo | null;
+  // The library's own live window, when it keeps one apart from video.seekable.
+  seekRange?(): { start: number; end: number } | null;
   destroy(): void | Promise<void>;
 }

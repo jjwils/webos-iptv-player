@@ -189,7 +189,7 @@ test.describe('Settings navigation', () => {
         };
       }));
 
-    expect(layouts).toHaveLength(6);
+    expect(layouts).toHaveLength(7);
     for (const layout of layouts) {
       expect(Math.abs(layout.controlCenter - layout.rowCenter)).toBeLessThanOrEqual(1);
       expect(layout.controlRightGap).toBe(20);

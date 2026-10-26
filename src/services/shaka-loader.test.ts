@@ -7,7 +7,7 @@ const scope = window as Window & { __shaka?: ShakaNamespaceLike; shaka?: ShakaNa
 afterEach(() => {
   delete scope.__shaka;
   delete scope.shaka;
-  document.querySelector('script[src="js/shaka-player.dash.js"]')?.remove();
+  document.querySelector('script[src="js/shaka-player.compiled.js"]')?.remove();
 });
 
 async function setup(): Promise<{
@@ -29,7 +29,7 @@ async function setup(): Promise<{
 describe('Shaka inline JSON licenses', () => {
   it('loads the vendor script from the js directory', async () => {
     const pending = loadShaka();
-    const script = document.querySelector<HTMLScriptElement>('script[src="js/shaka-player.dash.js"]');
+    const script = document.querySelector<HTMLScriptElement>('script[src="js/shaka-player.compiled.js"]');
     expect(script).not.toBeNull();
     const namespace: ShakaNamespaceLike = {
       Player: class {},

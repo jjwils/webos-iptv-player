@@ -32,6 +32,7 @@ export interface ShakaPlayerLike {
   getAudioTracks(): ShakaAudioTrack[];
   getTextTracks(): ShakaTextTrack[];
   getVariantTracks(): ShakaVariantTrack[];
+  seekRange?(): { start: number; end: number };
   selectAudioTrack(track: ShakaAudioTrack): void;
   selectTextTrack(track?: ShakaTextTrack | null): void;
   destroy(): void | Promise<void>;
@@ -85,6 +86,9 @@ export function createShakaEngine(player: ShakaPlayerLike): MseEngine {
         audioChannels: active.channelsCount ? String(active.channelsCount) : '',
         audioAtmos: active.spatialAudio === true && active.audioCodec?.trim().toLowerCase().split('.')[0] === 'ec-3',
       };
+    },
+    seekRange() {
+      return player.seekRange?.() ?? null;
     },
     destroy(): void | Promise<void> {
       return player.destroy();

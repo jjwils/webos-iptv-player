@@ -48,6 +48,13 @@ export const CONFIG = {
     LIVE_PREVIEW_REFRESH_MS: 1000,
     DEFAULT_PLAYER_OSD_TIMEOUT_MS: 5000,
     BUFFER_LENGTH: 30,
+    // Shaka live HLS on webOS: 4K segments are large and the renderer shares
+    // ~1.3 GB with the system, which kills it under a full 30 s + 30 s buffer.
+    SHAKA_LIVE_BUFFER_AHEAD: 20,
+    SHAKA_LIVE_BUFFER_BEHIND: 10,
+    // mpegts.js evicts back to MIN once MAX seconds sit behind the playhead.
+    MPEGTS_BUFFER_BEHIND_MAX: 20,
+    MPEGTS_BUFFER_BEHIND_MIN: 10,
     MANIFEST_TIMEOUT: 5000,
     MANIFEST_MAX_BYTES: 256 * 1024,
     // Long live SegmentTimelines need a larger budget so the parser receives

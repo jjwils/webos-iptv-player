@@ -198,6 +198,7 @@ function callbacks(overrides: Partial<PlayerPipelineOptions> = {}): PlayerPipeli
     onAudioTracksUpdated: vi.fn(),
     onSubtitleTracksUpdated: vi.fn(),
     onManifest: vi.fn(),
+    onStreamInfoUpdated: vi.fn(),
     ...overrides,
   };
 }
@@ -298,7 +299,7 @@ describe('PlayerPipeline desktop routing', () => {
       type,
       isLive: true,
       url: 'http://host/a',
-    });
+    }, expect.objectContaining({ autoCleanupSourceBuffer: true }));
     const player = fakeMpegts.createPlayer.mock.results[0].value;
     expect(player.attachMediaElement).toHaveBeenCalledWith(video);
     expect(player.load).toHaveBeenCalledOnce();
@@ -498,6 +499,7 @@ describe('PlayerPipeline desktop DASH', () => {
 
     expect(player?.configure).toHaveBeenCalledWith({
       streaming: { bufferingGoal: CONFIG.PLAYER.BUFFER_LENGTH },
+      mediaSource: { transmuxWorkerUrl: 'js/shaka-player.transmuxer-worker.js' },
     });
     expect(player?.attach).toHaveBeenCalledWith(video);
     expect(player?.load).toHaveBeenCalledWith('http://host/a');
@@ -528,6 +530,7 @@ describe('PlayerPipeline desktop DASH', () => {
 
     expect(player?.configure).toHaveBeenCalledWith({
       streaming: { bufferingGoal: CONFIG.PLAYER.BUFFER_LENGTH },
+      mediaSource: { transmuxWorkerUrl: 'js/shaka-player.transmuxer-worker.js' },
       drm: {
         preferredKeySystems: ['com.widevine.alpha'],
         servers: { 'com.widevine.alpha': 'http://host/license' },
@@ -546,6 +549,7 @@ describe('PlayerPipeline desktop DASH', () => {
     });
     expect(lastShakaPlayer()?.configure).toHaveBeenCalledWith({
       streaming: { bufferingGoal: CONFIG.PLAYER.BUFFER_LENGTH },
+      mediaSource: { transmuxWorkerUrl: 'js/shaka-player.transmuxer-worker.js' },
       drm: { preferredKeySystems: ['org.w3.clearkey'], servers: {}, clearKeys: { [kid]: key } },
     });
     expect(pipeline.drmLabel()).toBe('ClearKey');

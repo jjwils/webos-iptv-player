@@ -2,10 +2,22 @@ import { parse } from 'acorn';
 import { ALLOWLIST, scanBundle } from './compat-gate.mjs';
 
 const EXPECTED_RAW = new Map([
-  ['finally', 3],
+  ['finally', 6],
   ['trimStart', 1],
+  ['getOrInsert', 6],
+  ['getOrInsertComputed', 21],
   ['BigInt', 2],
 ]);
+
+const EXPECTED_WORKER_RAW = new Map([
+  ['getOrInsertComputed', 2],
+]);
+
+// Shaka installs its Map upsert polyfills on the page only, so the transmuxer
+// worker gets its own copy.
+const WORKER_POLYFILL = 'if(!Map.prototype.getOrInsertComputed){'
+  + 'Map.prototype.getOrInsertComputed=function(k,f){'
+  + 'if(!this.has(k))this.set(k,f(k));return this.get(k);};}\n';
 
 function describe(violations) {
   return violations.map(({ name, count }) => `${name} x${count}`).join(', ') || 'none';
@@ -70,7 +82,7 @@ function validateBigIntGuards(ast) {
   visit(ast, []);
 
   if (calls.length !== 2) {
-    throw new Error(`Expected exactly two Shaka DASH BigInt calls, found ${calls.length}.`);
+    throw new Error(`Expected exactly two Shaka BigInt calls, found ${calls.length}.`);
   }
   for (const call of calls) {
     const guarded = call.ancestors.some((ancestor) =>
@@ -79,7 +91,7 @@ function validateBigIntGuards(ast) {
       && contains(ancestor.right, call.node)
       && hasBigIntAvailabilityCheck(ancestor.left));
     if (!guarded) {
-      throw new Error('A Shaka DASH BigInt call is not controlled by a window availability check.');
+      throw new Error('A Shaka BigInt call is not controlled by a window availability check.');
     }
   }
 }
@@ -97,6 +109,17 @@ export const SHAKA_COMPAT_ALLOWLIST = [
     note: 'Shaka installs trimLeft and aliases its guarded String.prototype.trimStart polyfill.',
   },
   {
+    name: 'getOrInsert',
+    reason: 'polyfilled',
+    note: 'Shaka installs its guarded Map.prototype.getOrInsert polyfill before Player use.',
+  },
+  {
+    name: 'getOrInsertComputed',
+    reason: 'polyfilled',
+    note: 'Shaka installs its guarded Map.prototype.getOrInsertComputed polyfill on the page; '
+      + 'prepareShakaWorker() adds it to the transmuxer worker.',
+  },
+  {
     name: 'BigInt',
     reason: 'guarded',
     note: 'The DASH timeline calls are behind a window.BigInt availability check.',
@@ -108,14 +131,19 @@ export function validateShakaBundle(code) {
   try {
     ast = parse(code, { ecmaVersion: 5, sourceType: 'script' });
   } catch (error) {
-    throw new Error(`The Shaka DASH bundle is not valid ES5: ${error.message}`);
+    throw new Error(`The Shaka bundle is not valid ES5: ${error.message}`);
   }
   if (code.indexOf('application/msf') !== -1) {
-    throw new Error('The Shaka DASH bundle unexpectedly includes the BigInt-dependent MSF parser.');
+    throw new Error('The Shaka bundle unexpectedly includes the BigInt-dependent MSF parser.');
   }
 
   expectViolations('vendor bundle', scanBundle(code), EXPECTED_RAW);
-  for (const path of ['Promise.prototype.finally', 'String.prototype.trimStart']) {
+  for (const path of [
+    'Promise.prototype.finally',
+    'String.prototype.trimStart',
+    'Map.prototype.getOrInsert',
+    'Map.prototype.getOrInsertComputed',
+  ]) {
     if (code.indexOf(path) === -1) {
       throw new Error(`The Shaka bundle no longer contains its ${path} polyfill.`);
     }
@@ -125,4 +153,14 @@ export function validateShakaBundle(code) {
   if (violations.length) {
     throw new Error(`Unreviewed Shaka compatibility violations: ${describe(violations)}.`);
   }
+}
+
+export function prepareShakaWorker(code) {
+  try {
+    parse(code, { ecmaVersion: 5, sourceType: 'script' });
+  } catch (error) {
+    throw new Error(`The Shaka transmuxer worker is not valid ES5: ${error.message}`);
+  }
+  expectViolations('transmuxer worker', scanBundle(code), EXPECTED_WORKER_RAW);
+  return WORKER_POLYFILL + code;
 }

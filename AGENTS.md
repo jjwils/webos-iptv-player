@@ -137,7 +137,9 @@ build constant; `scripts/sync-version.mjs` runs on `npm version`.
   `PlayerTracks` (`player-tracks.ts`). A desktop MSE library owns its own
   tracks behind the `MseEngine` adapters in `src/components/mse/`
   (`isMseActive()`); on webOS everything plays natively, DASH included — see
-  `docs/mpeg-dash.md`.
+  `docs/mpeg-dash.md` — except Widevine/ClearKey DASH and, when the Live
+  player setting picks Shaka or mpegts.js, live streams
+  (`docs/shaka-live-player.md`).
 - **Services** (`src/services/`) expose facades such as `PlaylistService`,
   `EpgService`, `StorageService`, `SetupClient`, `UploadClient`, and
   `ReminderService`. `StorageService` keeps boot-critical configuration under

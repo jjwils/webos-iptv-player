@@ -27,7 +27,7 @@ import { StorageService } from '../services/storage-service';
 import { CONFIG } from '../config';
 import { StallWatchdog, type StallProbe, type StallRecovery } from '../utils/stall-watchdog';
 import { StartupWatchdog, type StartupFailure, type StartupProbe } from '../utils/startup-watchdog';
-import { resolutionBadge, hdrLabel, frameRateLabel, pickVariant, codecName, audioSummary, subtitleSummary, type StreamVariant, type MediaInfo } from '../utils/stream-info';
+import { resolutionBadge, hdrLabel, frameRateLabel, channelLayoutLabel, pickVariant, codecName, audioSummary, subtitleSummary, type StreamVariant, type MediaInfo } from '../utils/stream-info';
 import { extFromUrl, diagnosticStreamUrl, streamUrlMime } from '../utils/url';
 import { isWebOS } from '../utils/platform';
 import { probeMedia } from '../services/media-probe';
@@ -156,6 +156,9 @@ export class Player {
         if (this.osd.isVisible()) this.osd.render();
       },
       onManifest: manifest => this.applyPipelineManifest(manifest),
+      onStreamInfoUpdated: () => {
+        if (this.osd.isVisible()) this.osd.render();
+      },
     });
     this.tracks = new PlayerTracks(this.pipeline, {
       getVideoElement: () => this.videoEl,
@@ -1175,7 +1178,7 @@ export class Player {
   private liveDvrWindow(): DvrWindow | null {
     const v = this.videoEl;
     if (!v || this.catchupInfo) return null;
-    return dvrWindow(v.seekable, v.duration, CONFIG.PLAYER.DVR_MIN_WINDOW);
+    return dvrWindow(this.pipeline.liveSeekable() ?? v.seekable, v.duration, CONFIG.PLAYER.DVR_MIN_WINDOW);
   }
 
   isLiveDvr(): boolean {
@@ -1248,7 +1251,8 @@ export class Player {
   }
 
   private reconcileLiveDvrPosition(el: HTMLVideoElement): void {
-    if (el !== this.videoEl || el.paused || el.seeking) return;
+    // Shaka keeps the playhead inside its own live window; correcting it here fights Shaka.
+    if (el !== this.videoEl || el.paused || el.seeking || this.pipeline.isShakaActive()) return;
     const win = this.liveDvrWindow();
     if (!win || el.currentTime >= win.start) return;
     const target = this.oldestDvrTarget(win);
@@ -1369,7 +1373,8 @@ export class Player {
     // the active audio track's channel layout — loadLevelObj carries no channels.
     const hlsChannels = lvl?.audioChannels ?? '';
     const atmos = lvl?.audioAtmos ?? (variant?.atmos || /\bJOC\b/i.test(hlsChannels));
-    const aCodec = aCodecName && atmos ? `${aCodecName} Atmos` : aCodecName;
+    const layout = aCodecName ? channelLayoutLabel(lvl?.audioLayout ?? '', hlsChannels) : '';
+    const aCodec = [aCodecName, layout, aCodecName && atmos ? 'Atmos' : ''].filter(Boolean).join(' ');
     const hdr = hdrLabel(lvl?.videoRange ?? variant?.videoRange ?? info?.hdr ?? '');
     const fps = frameRateLabel(lvl?.frameRate ?? variant?.frameRate ?? info?.fps ?? 0);
     const drm = this.pipeline.drmLabel();
